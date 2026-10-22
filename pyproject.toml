@@ -1,0 +1,15 @@
+[build-system]
+requires = ["flit_core>=3.4,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "elevenfc_manufacturing"
+version = "0.1.0"
+description = "11FC manufacturing Job Card material variance extension for ERPNext v16"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.bench.frappe-dependencies]
+frappe = ">=16.0.0-dev,<17.0.0"
+erpnext = ">=16.52.0,<17.0.0"
