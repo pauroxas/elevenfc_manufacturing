@@ -1,53 +1,41 @@
-# 11FC Manufacturing — Material Variance Approval v0.2.0
+# 11FC Manufacturing v0.3.0 — Under-Transfer and Over-Transfer
 
-This upgrades the existing `elevenfc_manufacturing` v0.1.0 app for **Frappe v16 / ERPNext v16.52.x**.
+**Development-only candidate for ERPNext/Frappe v16.52.x. Do not deploy to production before QA.**
 
-## Purpose
+## Policy
 
-Preserve the original BOM, Work Order, and Job Card Required Qty while allowing authorized material variances.
+- Zero, partial and exact raw material **transfers** can proceed with no approval.
+- Transfers above original Work Order requirements require approval from a user assigned **11FC Over-Transfer Approver** plus Stock Entry write permission.
+- Rules apply to **Material Transfer for Manufacture Stock Entries**, whether created from Work Orders or Job Cards.
+- Uses **cumulative submitted transfers** in Stock UOM, net of submitted returns, grouped by Work Order and (when linked) Job Card. Multiple line items per same code are combined.
+- Extra/unplanned materials exceed a zero planned quantity and require approval.
+- Approval is given on a saved **draft Stock Entry**, includes a reason, approver and timestamp, and is bound to a fingerprint of its proposed stock movement, Work Order plan, Job Card plan, and earlier submitted transfers.
+- If quantities or preceding transfers change, the approval becomes invalid at submission.
+- These rules govern **transfer to WIP, not actual material consumption**. Manufacture Stock Entries retain ERPNext's standard consumption and valuation rules.
+- Original BOM, Work Order and Job Card material requirements are never rewritten.
 
-Example: A Work Order plans **50 units of raw material** to produce **100 FG**. Actual transferred material is **30 units**. Once approved, the Job Card may Start, Complete, and Submit without changing the original required material quantity.
+## Migration from v0.2.0
 
-## Approval workflow
+The new **11FC Over-Transfer Approver** role and Stock Entry approval fields are created during migration. Previous v0.2.0 Job Card approval fields and audit history are preserved but are no longer used to authorize under-transfers. Assign the new role only to the correct users. Old material variance role is not sufficient to approve over-transfers.
 
-1. The application creates the role `11FC Material Variance Approver`; administrators assign it to production approvers. System Managers may also approve.
-2. An authorized approver opens a draft Job Card, selects **Material Variance → Approve Material Variance**, and enters a justification of 10–500 characters.
-3. The application checks role and write access, valid Work Order quantities, positive submitted raw-material transfers for every originally required component, and FG-equivalent transfer coverage.
-4. The Job Card stores read-only approved by, approved on, reason and a fingerprint of the plan and submitted transfer quantities, plus a comment audit trail.
-5. If transfer quantities, the Work Order plan, or the FG target change, approval is invalidated and must be renewed.
-6. Authorized approvers may revoke approval before submission.
+## Testing before merging
 
-The original BOM, WO, Job Card Required Qty, Stock Entries, and actual material consumption are not automatically changed. The app affects Job Card material-variance validation and its dashboard behavior; normal FG production, stock and other validations still apply.
+1. Install on separate Frappe Cloud dev/staging bench, run the site migrate, and refresh browser assets.
+2. Verify Job Card can Start/Complete/Submit with Required Qty=50, Transferred Qty=30 and actual FG count per Work Order; time logs must still be complete.
+3. Verify a Job Card with **zero** raw material transfer can complete when all other required workflow steps and ERPNext constraints are met; confirm stock and costing treatment.
+4. With WO item planned 50, transfer 30 then 20 (no approval) then another 10 (requires approval).
+5. Test 60 units in one transfer with an approved reason, and reject without approval.
+6. Test approved transfer edited afterward and another submitted transfer before submission: both must invalidate approval.
+7. Test two Job Cards sharing a Work Order, duplicate item lines, UOM conversion, and returns.
+8. Test an item not on the Work Order and a normal Stock Entry without manufacturing purpose.
+9. Verify unauthorized users cannot call the approval endpoint. Verify the role is assigned to named approvers.
+10. Check submitted ledger entries, actual WIP consumption, finished goods valuation, and standard Job Card Time Log requirements.
+11. Test concurrent submissions referencing one WO before production deployment.
 
-## Deploy on Frappe Cloud
+## Constraints
 
-1. Preserve your v0.1.0 version and deploy the update from a feature branch on a **staging private bench**.
-2. Run the site update / migrate so `after_migrate` creates the role and custom fields.
-3. Assign `11FC Material Variance Approver` to production approvers.
-4. Hard-refresh the Job Card page for updated JavaScript.
-5. Test the scenarios below and review the ledger and FG valuation. Merge and deploy to production only after staging checks pass.
+The over-transfer threshold is derived from Work Order required raw materials in Stock UOM. When attached to a Job Card, a proportional Job Card threshold is also applied. The approval is per Stock Entry, not a permanent unlimited permission for the Work Order.
 
-## Required staging tests
+Known limitation: ERPNext's native creation screen may not offer an additional transfer line when the Job Card appears fully transferred. Such extra transfers should be drafted via a supported workflow and linked to the correct WO/JC with ERPNext's own validations intact.
 
-| Scenario | Expected result |
-|---|---|
-| WO requires 50, 30 transferred, FG 100, without approval | Block |
-| Same Job Card approved | Permit normal actions without editing Required Qty |
-| 50 planned and 30 transferred displayed | Preserve both values |
-| Unauthorized user attempts API approval | Deny |
-| Any required component has zero transfer | Deny approval |
-| FG transfer coverage less than FG target | Deny |
-| Transfer quantity changes after approval | Approval becomes invalid |
-| WO or FG target changes after approval | Approval becomes invalid |
-| Correct transfer without variance | Normal ERPNext flow |
-| Manufacture consumes actual raw material | Confirm WIP ledger/valuation independently |
-
-This version is not a substitute for Frappe end-to-end testing. Approval allows documented variance; it does not create Stock Entries or automatically complete finished goods.
-
-## Implementation
-
-- `extend_doctype_class` hooks the Job Card controller in v16.
-- `after_install` and `after_migrate` create custom fields and the approval role.
-- The approval endpoints enforce permissions.
-- `doctype_js` enhances Job Card UI after checking saved approval state.
-- The approval fingerprint prevents reusing an authorization after specified quantities change.
+GitHub changes alone do not deploy to Frappe Cloud. Merge after code review, then have the admin deploy/migrate and QA on dev before production.
