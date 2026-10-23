@@ -1,25 +1,59 @@
-"""Allow actual Job Card raw-material transfer to differ from the Work Order BOM.
+"""Use approved actual transfer quantities without editing original BOM/WO/Job Card requirements.
 
-ERPNext v16.52.0 added a check in has_short_transferred_material() that
-compares Job Card transfers to the original Work Order required quantities.
-This mixin evaluates the Job Card's current, adjusted item requirements instead.
-
-Other ERPNext protections are retained, including the job-level transfer
-coverage check in validate_transfer_qty(), inventory and FG rules.
+Target: ERPNext v16.52.x, Frappe v16.  Core checks continue to run via super().
+Approval is per-Job Card and tied to a snapshot of planned and transferred amounts.
 """
 
-from frappe.utils import flt
+import frappe
+from frappe import _
+from frappe.utils import cint, flt
+from elevenfc_manufacturing.variance import get_variance_context, approval_is_current
 
 
 class JobCardMaterialVarianceMixin:
-    def has_short_transferred_material(self):
-        """Return True when a Job Card item is below its own required quantity.
+    # Approval fields are writable only through our role-checked API, not by editing Job Card.
+    _approval_fields = (
+        "custom_11fc_variance_approved", "custom_11fc_variance_approved_by",
+        "custom_11fc_variance_approved_on", "custom_11fc_variance_reason",
+        "custom_11fc_variance_snapshot",
+    )
 
-        Do not compare against the original BOM/Work Order item requirement.
-        Only use submitted transfers reflected in Job Card Item.transferred_qty.
-        This still blocks shortages relative to Job Card requirements.
-        """
-        for row in self.items or []:
-            if flt(row.transferred_qty, 6) < flt(row.required_qty, 6):
-                return True
-        return False
+    def validate(self):
+        if not self.is_new():
+            saved = frappe.db.get_value("Job Card", self.name, self._approval_fields, as_dict=True)
+            if saved:
+                for fieldname in self._approval_fields:
+                    if str(self.get(fieldname) or "") != str(saved.get(fieldname) or ""):
+                        frappe.throw(_("Material variance approval fields cannot be edited directly."))
+        super().validate()
+
+    def validate_transfer_qty(self):
+        # Keep the special workflows controlled by ERPNext rather than interfere with them.
+        if not (
+            (self.track_semi_finished_goods and self.skip_material_transfer)
+            or self.finished_good
+            or self.is_corrective_job_card
+            or not self.items
+        ):
+            context = get_variance_context(self)
+            if context["has_variance"] and not approval_is_current(self, context):
+                frappe.throw(
+                    _("Material usage differs from the Work Order plan. A user with the "
+                      "11FC Material Variance Approver role must approve the variance "
+                      "before starting, completing, or submitting this Job Card."),
+                    title=_("Material Variance Approval Required"),
+                )
+
+        # Preserves native FG transfer coverage, quality, time log and stock restrictions.
+        return super().validate_transfer_qty()
+
+    def has_short_transferred_material(self):
+        context = get_variance_context(self)
+        if context["has_variance"] and approval_is_current(self, context):
+            # Do not waive every material check for an entirely missing component.
+            for item in context["items"]:
+                if item["planned"] > 0 and item["transferred"] <= 0:
+                    return True
+            return False
+        # With no approval, retain ERPNext's original WO-based validation.
+        return super().has_short_transferred_material()
