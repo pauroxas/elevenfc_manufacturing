@@ -44,6 +44,7 @@
             const jobCard = frm.doc.name;
             frappe.call({
                 method: "elevenfc_manufacturing.api.get_material_variance_status",
+                type: "GET",
                 args: {job_card: jobCard},
             }).then(({message}) => {
                 if (!message || frm.doc.name !== jobCard || frm.doc.docstatus !== 0) return;
