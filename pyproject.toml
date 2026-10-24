@@ -4,8 +4,8 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "elevenfc_manufacturing"
-version = "0.2.0"
-description = "11FC manufacturing Job Card material variance approval extension for ERPNext v16"
+version = "0.3.0"
+description = "11FC Job Card under-transfer and approved over-transfer controls"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
