@@ -14,6 +14,12 @@
 - These rules govern **transfer to WIP, not actual material consumption**. Manufacture Stock Entries retain ERPNext's standard consumption and valuation rules.
 - Original BOM, Work Order and Job Card material requirements are never rewritten.
 
+## Important ERPNext setting for extra Job Card transfers
+
+If operators must create an additional transfer **after a Job Card's original Required Qty has already been fully transferred**, turn on **Manufacturing Settings → Allow Excess Material Transfer** (`job_card_excess_transfer`) on the dev site. ERPNext otherwise may hide the transfer action or reject an additional manually entered Job Card item even when the custom approval is valid.
+
+This built-in setting only makes extra transfer entry creation possible. **It does not itself authorize submission**: the v0.3.0 Stock Entry submission hook still rejects cumulative over-transfer without the new role's approval. QA the interaction with standard Work Order transfers, Job Card item linking, and extra/raw material substitution rows before production.
+
 ## Migration from v0.2.0
 
 The new **11FC Over-Transfer Approver** role and Stock Entry approval fields are created during migration. Previous v0.2.0 Job Card approval fields and audit history are preserved but are no longer used to authorize under-transfers. Assign the new role only to the correct users. Old material variance role is not sufficient to approve over-transfers.
