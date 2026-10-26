@@ -1,39 +1,37 @@
-"""For 11FC, a raw material shortage is not a prerequisite to completing a Job Card.
+"""Client-approved Job Card transfer policy for 11FC.
 
-Do not mutate planned Job Card/BOM/WO quantities. Normal Job Card time logs,
-completion quantities and ERPNext's other validations remain enabled.
+Only waive the prerequisite to transfer all required raw materials before
+working on/submitting a Job Card. Material Transfer for Manufacture Stock
+Entries, actual consumption, reservations and stock valuation are untouched.
 """
-import frappe
-from frappe import _, bold
 
 
-class JobCardMaterialVarianceMixin:
-    def validate_semi_finished_goods(self):
-        """Waive only the zero-transfer prerequisite, preserving completion checks.
-
-        ERPNext v16.52 normally also blocks Job Cards for semi-finished-goods
-        production when transferred_qty is zero, independently from
-        validate_transfer_qty(). Our under-transfer policy permits zero.
-        """
-        if not self.track_semi_finished_goods or self.is_subcontracted:
-            return super().validate_semi_finished_goods()
-        if self.docstatus == 1 and not (
-            self.total_completed_qty or self.process_loss_qty or self.pending_qty
-        ):
-            frappe.throw(
-                _("Job Card {0} has no completed quantity. Complete the Job Card before submitting.").format(
-                    bold(self.name)
-                ),
-                title=_("Job Not Done Yet"),
-            )
-
-    def has_short_transferred_material(self):
-        # Under-transfer and zero-transfer are permitted.
-        return False
-
+class JobCardUnderTransferMixin:
     def validate_transfer_qty(self):
-        if self.finished_good or self.is_corrective_job_card or not self.items:
+        # Preserve ERPNext's normal behavior for specialized Job Cards.
+        if (
+            self.get("finished_good")
+            or self.get("is_corrective_job_card")
+            or self.get("is_subcontracted")
+            or not self.get("items")
+        ):
             return super().validate_transfer_qty()
-        # Intentionally waive ONLY the transfer-completion prerequisite.
-        # Native on_submit still calls inspection, time-log, WO and quantity checks.
-        return
+
+        # The standard ERPNext method only enforces material-transfer
+        # completion. For ordinary cards, both zero and partial transfers
+        # are permitted. Other native validations run during on_submit.
+        return None
+
+    def validate_semi_finished_goods(self):
+        # ERPNext separately checks for zero transferred_qty on semi-FG
+        # Job Cards. Temporarily waive this one prerequisite, but keep
+        # ALL its other native validations instead of copying them here.
+        if not self.get("track_semi_finished_goods") or self.get("is_subcontracted"):
+            return super().validate_semi_finished_goods()
+
+        previous = self.skip_material_transfer
+        try:
+            self.skip_material_transfer = 1
+            return super().validate_semi_finished_goods()
+        finally:
+            self.skip_material_transfer = previous
