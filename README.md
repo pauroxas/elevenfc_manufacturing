@@ -1,47 +1,52 @@
-# 11FC Manufacturing v0.3.0 — Under-Transfer and Over-Transfer
+# 11FC Manufacturing v0.3.1 — Limited client-approved DEV release
 
-**Development-only candidate for ERPNext/Frappe v16.52.x. Do not deploy to production before QA.**
+**Scope: Under-transfer and zero material transfer at Job Card only.**
 
-## Policy
+## Client-approved changes
 
-- Zero, partial and exact raw material **transfers** can proceed with no approval.
-- Transfers above original Work Order requirements require approval from a user assigned **11FC Over-Transfer Approver** plus Stock Entry write permission.
-- Rules apply to **Material Transfer for Manufacture Stock Entries**, whether created from Work Orders or Job Cards.
-- Uses **cumulative submitted transfers** in Stock UOM, net of submitted returns, grouped by Work Order and (when linked) Job Card. Multiple line items per same code are combined.
-- Extra/unplanned materials exceed a zero planned quantity and require approval.
-- Approval is given on a saved **draft Stock Entry**, includes a reason, approver and timestamp, and is bound to a fingerprint of its proposed stock movement, Work Order plan, Job Card plan, and earlier submitted transfers.
-- If quantities or preceding transfers change, the approval becomes invalid at submission.
-- These rules govern **transfer to WIP, not actual material consumption**. Manufacture Stock Entries retain ERPNext's standard consumption and valuation rules.
-- Original BOM, Work Order and Job Card material requirements are never rewritten.
+- A standard Job Card is not blocked at Start/Complete/Submit just because
+  fewer raw materials were transferred to WIP than the original requirement.
+- The same applies when **zero** materials were transferred.
+- BOM, Work Order and Job Card required quantities remain unchanged.
+- Native time logs, completed quantity, Work Order, sequence, inspection,
+  manufacturing output, stock ledger and accounting validations remain active.
 
-## Important ERPNext setting for extra Job Card transfers
+## Explicitly excluded from this release
 
-If operators must create an additional transfer **after a Job Card's original Required Qty has already been fully transferred**, turn on **Manufacturing Settings → Allow Excess Material Transfer** (`job_card_excess_transfer`) on the dev site. ERPNext otherwise may hide the transfer action or reject an additional manually entered Job Card item even when the custom approval is valid.
+- No new over-transfer approval role or approval API.
+- No new Stock Entry hooks or cumulative transfer validation.
+- No consumption / overconsumption change.
+- No BOM substitution change.
+- No change to Manufacturing Settings or native excess-transfer limits.
+- Existing v0.2.0/v0.3.0 approval custom field values remain in the database
+  for history but approval controls are hidden during migration.
 
-This built-in setting only makes extra transfer entry creation possible. **It does not itself authorize submission**: the v0.3.0 Stock Entry submission hook still rejects cumulative over-transfer without the new role's approval. QA the interaction with standard Work Order transfers, Job Card item linking, and extra/raw material substitution rows before production.
+If approval of over-transfers is required in a future phase, design/review
+that as a separate, explicitly authorized release.
 
-## Migration from v0.2.0
+## DEV deployment
 
-The new **11FC Over-Transfer Approver** role and Stock Entry approval fields are created during migration. Previous v0.2.0 Job Card approval fields and audit history are preserved but are no longer used to authorize under-transfers. Assign the new role only to the correct users. Old material variance role is not sufficient to approve over-transfers.
+1. Keep PROD unchanged. Make a DEV database/files backup.
+2. Deploy this repository's `main` at v0.3.1 to the DEV bench and migrate site.
+3. Build assets / restart / clear cache according to Frappe Cloud workflow.
+4. Verify Installed Apps version 0.3.1.
+5. Ensure **Manufacturing Settings → Allow Excess Material Transfer** is OFF
+   unless DEV already depends on it for another approved use case.
+6. Complete and sign off DEV manufacturing + accounting tests before PROD.
 
-## Testing before merging
+## Test scenarios
 
-1. Install on separate Frappe Cloud dev/staging bench, run the site migrate, and refresh browser assets.
-2. Verify Job Card can Start/Complete/Submit with Required Qty=50, Transferred Qty=30 and actual FG count per Work Order; time logs must still be complete.
-3. Verify a Job Card with **zero** raw material transfer can complete when all other required workflow steps and ERPNext constraints are met; confirm stock and costing treatment.
-4. With WO item planned 50, transfer 30 then 20 (no approval) then another 10 (requires approval).
-5. Test 60 units in one transfer with an approved reason, and reject without approval.
-6. Test approved transfer edited afterward and another submitted transfer before submission: both must invalidate approval.
-7. Test two Job Cards sharing a Work Order, duplicate item lines, UOM conversion, and returns.
-8. Test an item not on the Work Order and a normal Stock Entry without manufacturing purpose.
-9. Verify unauthorized users cannot call the approval endpoint. Verify the role is assigned to named approvers.
-10. Check submitted ledger entries, actual WIP consumption, finished goods valuation, and standard Job Card Time Log requirements.
-11. Test concurrent submissions referencing one WO before production deployment.
+- WO requires 50 units: Job Card with 0 and with 30 material transferred can
+  Start, Complete and Submit with valid time logs and completed quantity.
+- WO requires 50 units: exact transfer of 50 behaves normally.
+- Transfer of 60 against 50: ERPNext's standard over-transfer restriction still
+  applies; 11FC does not add an approval mechanism.
+- Submitted non-Job-Card manufacturing transfers remain unchanged.
+- Subcontracted / corrective / finished-good Job Cards keep their native rules.
+- Manufacturing Stock Entry creation, returned components, stock and GL
+  valuation are unchanged; verify these end to end on DEV.
+- A submitted Job Card must still require valid time logs, quantity completion,
+  quality/sequence rules and other ERPNext built-in checks.
 
-## Constraints
-
-The over-transfer threshold is derived from Work Order required raw materials in Stock UOM. When attached to a Job Card, a proportional Job Card threshold is also applied. The approval is per Stock Entry, not a permanent unlimited permission for the Work Order.
-
-Known limitation: ERPNext's native creation screen may not offer an additional transfer line when the Job Card appears fully transferred. Such extra transfers should be drafted via a supported workflow and linked to the correct WO/JC with ERPNext's own validations intact.
-
-GitHub changes alone do not deploy to Frappe Cloud. Merge after code review, then have the admin deploy/migrate and QA on dev before production.
+Source compatibility was reviewed against ERPNext v16.52.0. This release has
+not been deployed to a live Frappe/ERPNext instance for end-to-end QA.

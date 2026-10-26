@@ -4,8 +4,8 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "elevenfc_manufacturing"
-version = "0.3.0"
-description = "11FC Job Card under-transfer and approved over-transfer controls"
+version = "0.3.1"
+description = "11FC Job Card under-transfer and zero-transfer support"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
