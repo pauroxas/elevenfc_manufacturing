@@ -123,7 +123,11 @@ def _returnable_rows(source):
         ):
             continue
 
-        # Serial and batch-tracked returns need per-identity matching. Do not\n        # enable them until that additional workflow is implemented and tested.\n        if frappe.get_cached_value("Item", row.item_code, "has_serial_no") or frappe.get_cached_value("Item", row.item_code, "has_batch_no"):\n            continue\n\n        original_left = max(0, flt(row.transfer_qty) - returned.get(row.name, 0))
+        # Serial and batch-tracked returns require identity-level matching.
+        if frappe.get_cached_value("Item", row.item_code, "has_serial_no") or frappe.get_cached_value("Item", row.item_code, "has_batch_no"):
+            continue
+
+        original_left = max(0, flt(row.transfer_qty) - returned.get(row.name, 0))
         wip_key = (row.item_code, row.t_warehouse, row.original_item or None)
         wip_left = wip.get(wip_key, 0)
         jc_left = jc_available.get(row.job_card_item, 0)
@@ -231,7 +235,10 @@ def validate_return_doc(doc, lock_source=False):
         if row.stock_uom != original_row.stock_uom:
             frappe.throw(_("Return row {0}: Stock UOM must match original.").format(row.idx))
 
-        if frappe.get_cached_value("Item", row.item_code, "has_serial_no") or frappe.get_cached_value("Item", row.item_code, "has_batch_no"):\n            frappe.throw(_("Serial/batch tracked items are not yet supported by the 11FC Job Card return workflow."))\n\n        requested_by_detail[row.ste_detail] += flt(row.transfer_qty)
+        if frappe.get_cached_value("Item", row.item_code, "has_serial_no") or frappe.get_cached_value("Item", row.item_code, "has_batch_no"):
+            frappe.throw(_("Serial/batch tracked items are not yet supported by the 11FC Job Card return workflow."))
+
+        requested_by_detail[row.ste_detail] += flt(row.transfer_qty)
         key = (row.item_code, row.s_warehouse, row.original_item or None)
         requested_by_wip[key] += flt(row.transfer_qty)
         requested_by_jc[row.job_card_item] += flt(row.transfer_qty)
@@ -324,3 +331,86 @@ def create_draft_return(job_card, original_entry, quantities):
     # Permission check and ALL native validations execute on insert.
     doc.insert()
     return {"name": doc.name}
+
+
+@frappe.whitelist()
+def get_job_card_returnable_rows(job_card):
+    """Return eligible material rows from ALL submitted transfers for a Job Card.
+
+    The user does not have to select a source Stock Entry. Each row carries its
+    original document and line IDs internally for creation/traceability.
+    """
+    transfers = list_original_transfers(job_card)
+    result = []
+    for source in transfers:
+        rows = get_returnable_rows(job_card, source["name"])
+        for row in rows:
+            row["original_entry"] = source["name"]
+            result.append(row)
+    return result
+
+
+@frappe.whitelist()
+def create_draft_returns(job_card, quantities):
+    """Make one draft Stock Entry per original source automatically.
+
+    One return Stock Entry can only have a single original source in our
+    first release. If rows were selected across several sources, this method
+    creates separate drafts in one request. All drafts stay unsubmitted.
+    """
+    _jc, _wo = _load_job_card(job_card)
+    if not frappe.has_permission("Stock Entry", "create"):
+        frappe.throw(_("Not permitted to create Stock Entries."), frappe.PermissionError)
+
+    quantities = frappe.parse_json(quantities)
+    if not isinstance(quantities, list) or not quantities or len(quantities) > 100:
+        frappe.throw(_("Enter return quantities for at least one eligible material row."))
+
+    available_rows = get_job_card_returnable_rows(job_card)
+    indexed = {(d["original_entry"], d["source_detail"]): d for d in available_rows}
+    grouped = defaultdict(lambda: defaultdict(float))
+    totals_wip = defaultdict(float)
+    totals_job_item = defaultdict(float)
+    original_rows = defaultdict(float)
+
+    for entry in quantities:
+        if not isinstance(entry, dict):
+            frappe.throw(_("Invalid return material row."))
+
+        source = entry.get("original_entry")
+        detail = entry.get("source_detail")
+        qty = flt(entry.get("qty"))
+        key = (source, detail)
+        if key not in indexed or qty <= 0:
+            frappe.throw(_("An invalid or unavailable material row was selected."))
+
+        info = indexed[key]
+        original_rows[key] += qty
+        grouped[source][detail] += qty
+        wip_key = (info["item_code"], info["from_warehouse"], info["original_item"] or None)
+        totals_wip[wip_key] += qty
+        totals_job_item[info["job_card_item"]] += qty
+
+    # Each original line, WIP material and Job Card Item must be checked
+    # cumulatively across ALL selected rows/sources.
+    for key, qty in original_rows.items():
+        if flt(qty - indexed[key]["maximum_qty"], 6) > 0:
+            frappe.throw(_("Return quantity exceeds the available amount for an original transfer line."))
+
+    wip = _wip_available(_wo.name)
+    by_jc = _job_card_available(job_card)
+    for key, qty in totals_wip.items():
+        if flt(qty - wip.get(key, 0), 6) > 0:
+            frappe.throw(_("Total selected return quantity exceeds unconsumed WIP material."))
+    for key, qty in totals_job_item.items():
+        if flt(qty - by_jc.get(key, 0), 6) > 0:
+            frappe.throw(_("Total selected return quantity exceeds the Job Card's eligible material."))
+
+    created = []
+    for source_name, detail_quantities in grouped.items():
+        response = create_draft_return(
+            job_card, source_name,
+            [{"source_detail": detail, "qty": qty} for detail, qty in detail_quantities.items()],
+        )
+        created.append(response["name"])
+    return {"names": created}
