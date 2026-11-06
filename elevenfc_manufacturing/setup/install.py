@@ -26,6 +26,21 @@ LEGACY_FIELDS = {
 
 
 def setup_under_transfer_only():
+    from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
+
+    create_custom_fields({
+        "Stock Entry": [{
+            "fieldname": "custom_11fc_return_against_ste",
+            "label": "11FC Original Material Transfer",
+            "fieldtype": "Link",
+            "options": "Stock Entry",
+            "insert_after": "job_card",
+            "read_only": 1,
+            "no_copy": 1,
+            "depends_on": "eval:doc.is_return && doc.purpose === 'Material Transfer for Manufacture'",
+        }]
+    }, update=True)
+
     # Hidden, not deleted: existing approval records remain auditable.
     for doctype, fieldnames in LEGACY_FIELDS.items():
         changed = False
