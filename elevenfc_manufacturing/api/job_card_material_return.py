@@ -123,7 +123,7 @@ def _returnable_rows(source):
         ):
             continue
 
-        original_left = max(0, flt(row.transfer_qty) - returned.get(row.name, 0))
+        # Serial and batch-tracked returns need per-identity matching. Do not\n        # enable them until that additional workflow is implemented and tested.\n        if frappe.get_cached_value("Item", row.item_code, "has_serial_no") or frappe.get_cached_value("Item", row.item_code, "has_batch_no"):\n            continue\n\n        original_left = max(0, flt(row.transfer_qty) - returned.get(row.name, 0))
         wip_key = (row.item_code, row.t_warehouse, row.original_item or None)
         wip_left = wip.get(wip_key, 0)
         jc_left = jc_available.get(row.job_card_item, 0)
@@ -231,7 +231,7 @@ def validate_return_doc(doc, lock_source=False):
         if row.stock_uom != original_row.stock_uom:
             frappe.throw(_("Return row {0}: Stock UOM must match original.").format(row.idx))
 
-        requested_by_detail[row.ste_detail] += flt(row.transfer_qty)
+        if frappe.get_cached_value("Item", row.item_code, "has_serial_no") or frappe.get_cached_value("Item", row.item_code, "has_batch_no"):\n            frappe.throw(_("Serial/batch tracked items are not yet supported by the 11FC Job Card return workflow."))\n\n        requested_by_detail[row.ste_detail] += flt(row.transfer_qty)
         key = (row.item_code, row.s_warehouse, row.original_item or None)
         requested_by_wip[key] += flt(row.transfer_qty)
         requested_by_jc[row.job_card_item] += flt(row.transfer_qty)
