@@ -122,3 +122,104 @@ class TestJobCardMaterialReturn(TestCase):
         doc = DummyReturn()
         doc.source = None
         validate_return_doc(doc)
+
+
+    def test_auto_discovery_combines_rows_from_multiple_original_transfers(self):
+        from elevenfc_manufacturing.api.job_card_material_return import get_job_card_returnable_rows
+
+        with patch(
+            "elevenfc_manufacturing.api.job_card_material_return.list_original_transfers",
+            return_value=[{"name": "STE-A"}, {"name": "STE-B"}],
+        ), patch(
+            "elevenfc_manufacturing.api.job_card_material_return.get_returnable_rows",
+            side_effect=lambda _job_card, source: [
+                {"source_detail": "LINE-" + source, "item_code": "RM-A"}
+            ],
+        ):
+            results = get_job_card_returnable_rows("JC-1")
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(
+            [(r["original_entry"], r["source_detail"]) for r in results],
+            [("STE-A", "LINE-STE-A"), ("STE-B", "LINE-STE-B")],
+        )
+
+    def test_auto_creation_keeps_one_draft_per_source(self):
+        from elevenfc_manufacturing.api.job_card_material_return import create_draft_returns
+
+        rows = [
+            {"original_entry": "STE-A", "source_detail": "LINE-A",
+             "item_code": "RM-A", "from_warehouse": "WIP",
+             "original_item": None, "job_card_item": "JC-ITEM-1", "maximum_qty": 6},
+            {"original_entry": "STE-B", "source_detail": "LINE-B",
+             "item_code": "RM-A", "from_warehouse": "WIP",
+             "original_item": None, "job_card_item": "JC-ITEM-1", "maximum_qty": 4},
+        ]
+        quantities = [
+            {"original_entry": "STE-A", "source_detail": "LINE-A", "qty": 3},
+            {"original_entry": "STE-B", "source_detail": "LINE-B", "qty": 2},
+        ]
+        calls = []
+
+        def create_draft(_jc, source, parts):
+            calls.append((source, parts))
+            return {"name": "DRAFT-" + source}
+
+        with patch(
+            "elevenfc_manufacturing.api.job_card_material_return._load_job_card",
+            return_value=(object(), SimpleNamespace(name="WO-1")),
+        ), patch(
+            "elevenfc_manufacturing.api.job_card_material_return.frappe.has_permission",
+            return_value=True,
+        ), patch(
+            "elevenfc_manufacturing.api.job_card_material_return.get_job_card_returnable_rows",
+            return_value=rows,
+        ), patch(
+            "elevenfc_manufacturing.api.job_card_material_return._wip_available",
+            return_value={("RM-A", "WIP", None): 10},
+        ), patch(
+            "elevenfc_manufacturing.api.job_card_material_return._job_card_available",
+            return_value={"JC-ITEM-1": 10},
+        ), patch(
+            "elevenfc_manufacturing.api.job_card_material_return.create_draft_return",
+            side_effect=create_draft,
+        ):
+            response = create_draft_returns("JC-1", quantities)
+
+        self.assertEqual(response["names"], ["DRAFT-STE-A", "DRAFT-STE-B"])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][1][0]["source_detail"], "LINE-A")
+        self.assertEqual(calls[1][1][0]["source_detail"], "LINE-B")
+
+    def test_auto_creation_aggregates_wip_across_multiple_sources(self):
+        from elevenfc_manufacturing.api.job_card_material_return import create_draft_returns
+
+        rows = [
+            {"original_entry": "STE-A", "source_detail": "LINE-A",
+             "item_code": "RM-A", "from_warehouse": "WIP",
+             "original_item": None, "job_card_item": "JC-ITEM-1", "maximum_qty": 8},
+            {"original_entry": "STE-B", "source_detail": "LINE-B",
+             "item_code": "RM-A", "from_warehouse": "WIP",
+             "original_item": None, "job_card_item": "JC-ITEM-1", "maximum_qty": 8},
+        ]
+        with patch(
+            "elevenfc_manufacturing.api.job_card_material_return._load_job_card",
+            return_value=(object(), SimpleNamespace(name="WO-1")),
+        ), patch(
+            "elevenfc_manufacturing.api.job_card_material_return.frappe.has_permission",
+            return_value=True,
+        ), patch(
+            "elevenfc_manufacturing.api.job_card_material_return.get_job_card_returnable_rows",
+            return_value=rows,
+        ), patch(
+            "elevenfc_manufacturing.api.job_card_material_return._wip_available",
+            return_value={("RM-A", "WIP", None): 8},
+        ), patch(
+            "elevenfc_manufacturing.api.job_card_material_return._job_card_available",
+            return_value={"JC-ITEM-1": 8},
+        ):
+            with self.assertRaises(frappe.ValidationError):
+                create_draft_returns("JC-1", [
+                    {"original_entry": "STE-A", "source_detail": "LINE-A", "qty": 5},
+                    {"original_entry": "STE-B", "source_detail": "LINE-B", "qty": 5},
+                ])
