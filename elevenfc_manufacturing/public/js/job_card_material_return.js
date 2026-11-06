@@ -1,67 +1,29 @@
-/* 11FC: create a source-linked draft material return from a Job Card.
- * Does not auto-submit; native Stock Entry permissions, batch/serial, ledger
- * and other validations remain authoritative.
+/* 11FC: Job Card -> Return Materials, no original Stock Entry selection.
+ * Discover all eligible material transfers and preserve their origins internally.
+ * Creates draft(s) only; user reviews and submits through Stock Entry.
  */
 (function () {
     const api = "elevenfc_manufacturing.api.job_card_material_return";
 
-    async function choose_source(frm) {
-        try {
-            const response = await frappe.call({
-                method: api + ".list_original_transfers",
-                args: { job_card: frm.doc.name },
-                freeze: true,
-            });
-            const transfers = response.message || [];
-            if (!transfers.length) {
-                frappe.msgprint(__("No eligible submitted material transfers were found for this Job Card. Serial/batch tracked items require a separate return workflow."));
-                return;
-            }
-            const select_options = transfers.map(x => x.name);
-            const dialog = new frappe.ui.Dialog({
-                title: __("Return Materials — Select Original Transfer"),
-                fields: [
-                    {
-                        fieldtype: "Select",
-                        fieldname: "original_entry",
-                        label: __("Original Stock Entry"),
-                        options: select_options,
-                        default: select_options[0],
-                        reqd: 1,
-                    },
-                    { fieldtype: "HTML", options: "<p>" + __("Only unconsumed materials transferred to this Job Card can be returned.") + "</p>" },
-                ],
-                primary_action_label: __("Continue"),
-                async primary_action(values) {
-                    dialog.hide();
-                    await choose_items(frm, values.original_entry);
-                },
-            });
-            dialog.show();
-        } catch (e) {
-            frappe.msgprint(__("Unable to retrieve eligible material transfers. Please check your permissions and try again."));
-        }
-    }
-
-    async function choose_items(frm, original_entry) {
+    async function show_materials(frm) {
         const response = await frappe.call({
-            method: api + ".get_returnable_rows",
-            args: { job_card: frm.doc.name, original_entry },
+            method: api + ".get_job_card_returnable_rows",
+            args: { job_card: frm.doc.name },
             freeze: true,
         });
         const rows = response.message || [];
         if (!rows.length) {
-            frappe.msgprint(__("There are no remaining returnable quantities for this Stock Entry."));
+            frappe.msgprint(__("There are no eligible unconsumed materials to return for this Job Card. Serial/batch-tracked items are excluded from this initial workflow."));
             return;
         }
 
         const dialog = new frappe.ui.Dialog({
-            title: __("Return Materials from {0}", [original_entry]),
+            title: __("Return Materials"),
             size: "extra-large",
             fields: [
                 {
                     fieldtype: "HTML",
-                    options: "<p>" + __("Enter the return quantity for each material. A draft Stock Entry will be created for review; it will NOT be automatically submitted.") + "</p>",
+                    options: "<p>" + __("Select the quantities to return. The source transfers are linked automatically. The return Stock Entry will remain a draft until reviewed and submitted.") + "</p>",
                 },
                 {
                     fieldtype: "Table",
@@ -71,16 +33,16 @@
                     cannot_delete_rows: true,
                     in_place_edit: true,
                     data: rows.map(row => ({
+                        original_entry: row.original_entry,
                         source_detail: row.source_detail,
                         item_code: row.item_code,
                         stock_uom: row.stock_uom,
-                        from_warehouse: row.from_warehouse,
-                        to_warehouse: row.to_warehouse,
                         maximum_qty: row.maximum_qty,
                         qty: 0,
                     })),
                     fields: [
-                        { fieldtype: "Data", fieldname: "source_detail", label: __("Original Row"), read_only: 1, hidden: 1 },
+                        { fieldtype: "Data", fieldname: "original_entry", label: __("Original Transfer"), hidden: 1, read_only: 1 },
+                        { fieldtype: "Data", fieldname: "source_detail", label: __("Original Row"), hidden: 1, read_only: 1 },
                         { fieldtype: "Data", fieldname: "item_code", label: __("Material"), read_only: 1, in_list_view: 1, columns: 3 },
                         { fieldtype: "Data", fieldname: "stock_uom", label: __("UOM"), read_only: 1, in_list_view: 1, columns: 1 },
                         { fieldtype: "Float", fieldname: "maximum_qty", label: __("Available to Return"), read_only: 1, in_list_view: 1, columns: 3 },
@@ -90,31 +52,56 @@
             ],
             primary_action_label: __("Create Draft Return"),
             async primary_action() {
-                const quantities = (dialog.get_value("materials") || [])
+                const selected = (dialog.get_value("materials") || [])
                     .filter(row => flt(row.qty) > 0)
-                    .map(row => ({ source_detail: row.source_detail, qty: flt(row.qty) }));
-                if (!quantities.length) {
-                    frappe.msgprint(__("Enter a positive return quantity for at least one item."));
+                    .map(row => ({
+                        original_entry: row.original_entry,
+                        source_detail: row.source_detail,
+                        qty: flt(row.qty),
+                    }));
+
+                if (!selected.length) {
+                    frappe.msgprint(__("Enter a positive return quantity for at least one material."));
                     return;
                 }
-                for (const entry of quantities) {
-                    const source = rows.find(row => row.source_detail === entry.source_detail);
+
+                for (const entry of selected) {
+                    const source = rows.find(row =>
+                        row.original_entry === entry.original_entry &&
+                        row.source_detail === entry.source_detail
+                    );
                     if (!source || entry.qty > flt(source.maximum_qty)) {
-                        frappe.msgprint(__("Return quantity exceeds the available quantity for an item."));
+                        frappe.msgprint(__("A return quantity exceeds the allowable balance."));
                         return;
                     }
                 }
+
                 const result = await frappe.call({
-                    method: api + ".create_draft_return",
-                    args: { job_card: frm.doc.name, original_entry, quantities },
+                    method: api + ".create_draft_returns",
+                    args: { job_card: frm.doc.name, quantities: selected },
                     freeze: true,
                 });
-                if (result.message && result.message.name) {
-                    dialog.hide();
-                    frappe.set_route("Form", "Stock Entry", result.message.name);
+                const names = result.message?.names || [];
+                if (!names.length) return;
+
+                dialog.hide();
+                if (names.length === 1) {
+                    frappe.set_route("Form", "Stock Entry", names[0]);
+                } else {
+                    const message = names.map(name =>
+                        '<li><a href="/app/stock-entry/' +
+                        encodeURIComponent(name) + '">' +
+                        frappe.utils.escape_html(name) + '</a></li>'
+                    ).join("");
+                    frappe.msgprint({
+                        title: __("Draft Return Stock Entries Created"),
+                        message: "<p>" + __("Your selected materials came from multiple original transfers, so separate traceable draft Stock Entries were created. Review and submit each draft.") + "</p><ul>" + message + "</ul>",
+                        indicator: "blue",
+                    });
                 }
             },
         });
+
         dialog.show();
     }
 
@@ -126,7 +113,7 @@
             if (!frappe.model.can_create("Stock Entry")) return;
             frm.add_custom_button(
                 __("Return Materials"),
-                () => choose_source(frm),
+                () => show_materials(frm),
                 __("Create")
             );
         },
