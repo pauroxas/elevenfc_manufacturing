@@ -87,8 +87,12 @@ ONE DEV bench deployment and ONE acceptance cycle. Neither feature is released
 to production by creating this branch.
 
 - Job Card has **Create → Return Materials**.
-- Select a **submitted, non-return** Material Transfer for Manufacture made for
-  that exact Job Card, then select the original lines and return quantities.
+- Clicking **Return Materials** immediately displays eligible raw material rows
+  across all submitted non-return transfers for that Job Card. No original
+  Stock Entry selection is required from the user.
+- Original source Stock Entry and row references are looked up and kept
+  automatically. If selected items span more than one original transfer,
+  the system creates a separate linked **draft** Stock Entry per source.
 - Create a **draft** Stock Entry: purpose Material Transfer for Manufacture;
   `is_return=1`; reverse Stores → WIP back to WIP → original Stores.
 - Carry original Stock Entry header link
