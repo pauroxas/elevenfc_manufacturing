@@ -79,3 +79,68 @@ Branch: `feature/multi-so-multi-project-invoice-dev` (NOT part of approved v0.3.
 5. Test partly invoiced orders, item-level Project overrides, existing Delivery
    Notes, taxes, payment terms, mixed accounts and currencies, and refunds.
 6. Confirm UAT before merging and deploying. PROD must remain unchanged.
+
+## Pending feature branch: Return Materials from a Job Card
+
+This shares the **same** feature branch as the Sales Invoice enhancement, for
+ONE DEV bench deployment and ONE acceptance cycle. Neither feature is released
+to production by creating this branch.
+
+- Job Card has **Create → Return Materials**.
+- Select a **submitted, non-return** Material Transfer for Manufacture made for
+  that exact Job Card, then select the original lines and return quantities.
+- Create a **draft** Stock Entry: purpose Material Transfer for Manufacture;
+  `is_return=1`; reverse Stores → WIP back to WIP → original Stores.
+- Carry original Stock Entry header link
+  `custom_11fc_return_against_ste`, each row's
+  `against_stock_entry` / `ste_detail`, original `job_card_item`,
+  Work Order, Company, item, original item and stock UOM.
+- User must review and submit the return using normal Stock Entry permissions.
+- Permit this special, referenced Job Card return against an active submitted
+  Work Order before Manufacture; do **not** relax native return status for
+  unrelated Stock Entries.
+- Recheck under a database lock at submit. Return quantities cannot exceed
+  remaining original-row transfers, previously returned qty, currently
+  unconsumed WIP material or net Job Card Item quantities.
+- Recalculate **Job Card Item.transferred_qty** as submitted non-return material
+  transfers MINUS submitted return transfers. The separate Job Card header
+  `transferred_qty` is a manufacturing quantity and is NOT changed by this
+  feature.
+- Standard ERPNext Work Order `returned_qty` and stock/GL ledger postings
+  remain authoritative. Do not directly subtract returns again from the Work
+  Order's gross `transferred_qty`.
+- Manufacturing backflush must be verified with the effective BOM/Manufacturing
+  Setting **Material Transferred for Manufacture** before UAT.
+
+### Safety scope and exclusions
+
+- **Serial/batch-tracked items are not supported in this first release**:
+  their original voucher identity and return serial/batch selection require
+  additional development and tests. The selector does not offer these lines and
+  the server rejects manual attempts.
+- Original source transfers must have a Job Card Item reference. Generic Work
+  Order-only transfers are excluded from this feature.
+- No automatic submission of returns; no negative returns; no automatic
+  change of BOM required quantities; no change to existing Job Card
+  under-transfer / zero-transfer allowance.
+- When multiple Job Cards have transferred the same material to shared WIP,
+  verify consumption allocation against Work Order-level Manufacture entries
+  during UAT. If physical attribution cannot be proven, do not submit a return.
+
+### DEV integration test checklist (must pass BEFORE merging)
+
+1. Back up DEV; deploy **feature/multi-so-multi-project-invoice-dev** only.
+2. Run migration, build assets, clear cache and test app on DEV.
+3. Confirm Sales Invoice multi-SO feature still passes its accounting tests.
+4. Create Job Card material transfer of 50, submit return of 20: Job Card
+   raw-material item Transferred Qty becomes 30; Work Order Returned Qty=20.
+5. Click Manufacture (with transferred-based backflush): expect eligible 30
+   remaining, assuming no previous consumption and no other transfers.
+6. Submit another return of 10; cancel it; check Job Card and Work Order
+   quantity recalculations and stock/GL reversal.
+7. Reject duplicate concurrent returns and requests that exceed source,
+   remaining WIP, or consumed Job Card material.
+8. Verify partial transfers, multiple Job Cards sharing Work Order,
+   standard material transfer, non-return Stock Entry, completed Work Orders,
+   and stock reservations still behave correctly.
+9. Keep PROD unchanged. Do not merge until real DEV transaction UAT passes.
