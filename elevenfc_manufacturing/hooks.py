@@ -7,6 +7,7 @@ app_license = "MIT"
 
 extend_doctype_class = {
     "Job Card": ["elevenfc_manufacturing.overrides.job_card.JobCardUnderTransferMixin"],
+    "Sales Invoice": ["elevenfc_manufacturing.overrides.sales_invoice.MultiProjectSalesInvoiceMixin"],
 }
 
 doctype_js = {
