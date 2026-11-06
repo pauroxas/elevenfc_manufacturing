@@ -33,6 +33,9 @@ class JobCardMaterialReturnStockEntryMixin:
         return result
 
     def before_submit(self):
+        native_before_submit = getattr(super(), "before_submit", None)
+        if callable(native_before_submit):
+            native_before_submit()
         if self.get(RETURN_FIELD):
             # Validate again on submission under a source-row database lock.
             # This catches concurrent draft returns and manual changes to items.
