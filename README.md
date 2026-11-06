@@ -50,3 +50,32 @@ that as a separate, explicitly authorized release.
 
 Source compatibility was reviewed against ERPNext v16.52.0. This release has
 not been deployed to a live Frappe/ERPNext instance for end-to-end QA.
+
+## Pending feature branch: Multiple Sales Orders with different Projects → one Sales Invoice
+
+Branch: `feature/multi-so-multi-project-invoice-dev` (NOT part of approved v0.3.1 release).
+
+- Uses a Sales Invoice controller mixin; current Job Card logic remains unchanged.
+- For one invoice containing only items from at least two submitted Sales Orders
+  for the same Customer, Company, and Currency with different header Projects:
+  clear Sales Invoice header Project and set each line's Project from its
+  original Sales Order Item Project (or Sales Order header Project).
+- Keep `sales_order` / `so_detail` links and native billing, accounting,
+  taxes, currency, and row validation. Override only the conflicting parent
+  Project comparison against Sales Orders.
+- Normal single-project invoices, Sales Invoices from Delivery Notes, credit
+  notes, POS invoices, and mixed or unlinked items use standard validation.
+- Do not alter standard ERPNext core files or Stock Entry behavior.
+
+### Before merging or releasing
+
+1. Verify the exact deployed ERPNext v16 version's Sales Invoice reference
+   validation still matches the narrowly copied reference rule list.
+2. Run `bench --site <test-site> run-tests --app elevenfc_manufacturing`.
+3. On DEV, create 2+ Sales Orders for the same Customer and different Projects,
+   then add them with **Get Items From → Sales Order** to one invoice.
+4. Verify save, submit, cancellation, SO billed quantities and percentages,
+   income GL Project dimensions, and permission behavior.
+5. Test partly invoiced orders, item-level Project overrides, existing Delivery
+   Notes, taxes, payment terms, mixed accounts and currencies, and refunds.
+6. Confirm UAT before merging and deploying. PROD must remain unchanged.
