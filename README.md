@@ -148,3 +148,42 @@ to production by creating this branch.
    standard material transfer, non-return Stock Entry, completed Work Orders,
    and stock reservations still behave correctly.
 9. Keep PROD unchanged. Do not merge until real DEV transaction UAT passes.
+
+
+## Staging follow-up: Batch-tracked raw material returns (ink)
+
+Branch: `feature/job-card-batch-material-returns`. **Not yet approved for production.**
+
+- The existing **Job Card → Create → Return Materials** flow now also offers
+  batch-tracked (but **not serial-numbered**) raw materials.
+- The original Material Transfer for Manufacture is still discovered
+  automatically. Its saved **Serial and Batch Bundle** is used to identify the
+  actual transferred batches, with legacy `batch_no` supported as a fallback.
+- Each eligible batch gets a separate selector row, showing **Batch No.** and
+  current maximum returnable quantity.
+- The draft return Stock Entry carries `batch_no` and
+  `use_serial_batch_fields=1`, allowing ERPNext v16 to create the correct
+  **outward** Serial and Batch Bundle for WIP on update/submit. Do not copy the
+  original transfer bundle, since its warehouse and transaction differ.
+- The server checks the selected batch against the original transfer,
+  submitted returns for the exact source line/batch, current batch availability
+  in WIP, Work Order unconsumed quantity and Job Card Item net balance.
+- The original non-batch functionality, Sales Invoice enhancement and
+  serial-numbered exclusion remain unchanged.
+
+**Required staging UAT (do not deploy LIVE until signed off):**
+1. One ink batch: transfer 10, return 3, verify same batch moves WIP → Stores.
+2. One source row with two ink batches: return part of each; ensure separate
+   batch rows and correct quantities and bundle creation.
+3. Repeat a return against the same batch/source and reject excessive totals.
+4. Try returning an unrelated batch; expect rejection before submission.
+5. Consume ink in manufacture, then try returning more than its remaining
+   batch/WIP balance; expect rejection.
+6. Cancel a submitted return; verify quantities, batch ledger, Job Card and
+   Work Order corrections and GL reversals.
+7. Test normal non-batch materials, multiple original source transfers,
+   unavailable/expired batches, serial-numbered exclusions and mixed returns.
+8. Verify behaviour for actual site's Stock Settings (legacy batch fields,
+   Serial and Batch Bundle settings), reservations, and stock valuation.
+9. Run app unit/integration tests on a bench matching the deployed ERPNext
+   version. Source review is **not** a substitute for these tests.

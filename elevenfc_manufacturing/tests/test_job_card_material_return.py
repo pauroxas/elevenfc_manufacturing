@@ -191,6 +191,100 @@ class TestJobCardMaterialReturn(TestCase):
         self.assertEqual(calls[0][1][0]["source_detail"], "LINE-A")
         self.assertEqual(calls[1][1][0]["source_detail"], "LINE-B")
 
+    def test_original_batch_bundle_keeps_each_batch_identity(self):
+        from elevenfc_manufacturing.api.job_card_material_return import _row_batch_quantities
+
+        source = frappe._dict(
+            item_code="INK-A", batch_no=None, transfer_qty=10,
+            serial_and_batch_bundle="SABB-SOURCE",
+        )
+        entries = [
+            frappe._dict(batch_no="INK-BATCH-A", qty=-6),
+            frappe._dict(batch_no="INK-BATCH-B", qty=-4),
+        ]
+        with patch(
+            "elevenfc_manufacturing.api.job_card_material_return.frappe.get_all",
+            return_value=entries,
+        ):
+            self.assertEqual(
+                _row_batch_quantities(source),
+                {"INK-BATCH-A": 6, "INK-BATCH-B": 4},
+            )
+
+    def test_legacy_batch_field_is_supported(self):
+        from elevenfc_manufacturing.api.job_card_material_return import _row_batch_quantities
+
+        source = frappe._dict(
+            batch_no="INK-BATCH-A", transfer_qty=7,
+            serial_and_batch_bundle=None,
+        )
+        self.assertEqual(_row_batch_quantities(source), {"INK-BATCH-A": 7})
+
+    def test_batch_return_must_match_original_batch(self):
+        source = frappe._dict(self.source_row.__dict__)
+        source.batch_no = "INK-BATCH-A"
+        source.serial_and_batch_bundle = None
+        self.original.items = [source]
+        doc = DummyReturn([row(1, 3)])
+        doc.items[0].item_code = "INK-A"
+        source.item_code = "INK-A"
+        doc.items[0].batch_no = "INK-BATCH-OTHER"
+        self.patches[4] = patch(
+            "elevenfc_manufacturing.api.job_card_material_return.frappe.get_cached_value",
+            side_effect=lambda _type, _name, field: 1 if field == "has_batch_no" else 0,
+        )
+        with self.assertRaises(frappe.ValidationError):
+            self.run_with_mocks(doc)
+
+    def test_batch_return_cannot_exceed_original_batch_balance(self):
+        source = frappe._dict(self.source_row.__dict__)
+        source.batch_no = "INK-BATCH-A"
+        source.serial_and_batch_bundle = None
+        source.item_code = "INK-A"
+        self.original.items = [source]
+        doc = DummyReturn([row(1, 5)])
+        doc.items[0].item_code = "INK-A"
+        doc.items[0].batch_no = "INK-BATCH-A"
+        self.patches[4] = patch(
+            "elevenfc_manufacturing.api.job_card_material_return.frappe.get_cached_value",
+            side_effect=lambda _type, _name, field: 1 if field == "has_batch_no" else 0,
+        )
+        with patch(
+            "elevenfc_manufacturing.api.job_card_material_return._already_returned_by_batch",
+            return_value={("SOURCE-ROW-1", "INK-BATCH-A"): 7},
+        ), patch(
+            "elevenfc_manufacturing.api.job_card_material_return._batch_qty_available",
+            return_value=8,
+        ):
+            with self.assertRaises(frappe.ValidationError):
+                self.run_with_mocks(doc)
+
+    def test_batch_return_with_matching_batch_and_stock_is_allowed(self):
+        source = frappe._dict(self.source_row.__dict__)
+        source.batch_no = "INK-BATCH-A"
+        source.serial_and_batch_bundle = None
+        source.item_code = "INK-A"
+        self.original.items = [source]
+        doc = DummyReturn([row(1, 3)])
+        doc.items[0].item_code = "INK-A"
+        doc.items[0].batch_no = "INK-BATCH-A"
+        self.patches[2] = patch(
+            "elevenfc_manufacturing.api.job_card_material_return._wip_available",
+            return_value={("INK-A", "WIP", None): 8},
+        )
+        self.patches[4] = patch(
+            "elevenfc_manufacturing.api.job_card_material_return.frappe.get_cached_value",
+            side_effect=lambda _type, _name, field: 1 if field == "has_batch_no" else 0,
+        )
+        with patch(
+            "elevenfc_manufacturing.api.job_card_material_return._already_returned_by_batch",
+            return_value={("SOURCE-ROW-1", "INK-BATCH-A"): 2},
+        ), patch(
+            "elevenfc_manufacturing.api.job_card_material_return._batch_qty_available",
+            return_value=8,
+        ):
+            self.run_with_mocks(doc)
+
     def test_auto_creation_aggregates_wip_across_multiple_sources(self):
         from elevenfc_manufacturing.api.job_card_material_return import create_draft_returns
 
