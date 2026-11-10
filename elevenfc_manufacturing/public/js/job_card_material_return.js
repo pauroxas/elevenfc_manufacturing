@@ -13,7 +13,7 @@
         });
         const rows = response.message || [];
         if (!rows.length) {
-            frappe.msgprint(__("There are no eligible unconsumed materials to return for this Job Card. Serial/batch-tracked items are excluded from this initial workflow."));
+            frappe.msgprint(__("There are no eligible unconsumed materials to return for this Job Card. Serial-numbered items are not supported."));
             return;
         }
 
@@ -35,6 +35,7 @@
                     data: rows.map(row => ({
                         original_entry: row.original_entry,
                         source_detail: row.source_detail,
+                        batch_no: row.batch_no || null,
                         item_code: row.item_code,
                         stock_uom: row.stock_uom,
                         maximum_qty: row.maximum_qty,
@@ -44,9 +45,10 @@
                         { fieldtype: "Data", fieldname: "original_entry", label: __("Original Transfer"), hidden: 1, read_only: 1 },
                         { fieldtype: "Data", fieldname: "source_detail", label: __("Original Row"), hidden: 1, read_only: 1 },
                         { fieldtype: "Data", fieldname: "item_code", label: __("Material"), read_only: 1, in_list_view: 1, columns: 3 },
+                        { fieldtype: "Data", fieldname: "batch_no", label: __("Batch No"), read_only: 1, in_list_view: 1, columns: 2 },
                         { fieldtype: "Data", fieldname: "stock_uom", label: __("UOM"), read_only: 1, in_list_view: 1, columns: 1 },
-                        { fieldtype: "Float", fieldname: "maximum_qty", label: __("Available to Return"), read_only: 1, in_list_view: 1, columns: 3 },
-                        { fieldtype: "Float", fieldname: "qty", label: __("Return Qty"), in_list_view: 1, columns: 3 },
+                        { fieldtype: "Float", fieldname: "maximum_qty", label: __("Available to Return"), read_only: 1, in_list_view: 1, columns: 2 },
+                        { fieldtype: "Float", fieldname: "qty", label: __("Return Qty"), in_list_view: 1, columns: 2 },
                     ],
                 },
             ],
@@ -57,6 +59,7 @@
                     .map(row => ({
                         original_entry: row.original_entry,
                         source_detail: row.source_detail,
+                        batch_no: row.batch_no || null,
                         qty: flt(row.qty),
                     }));
 
@@ -68,7 +71,8 @@
                 for (const entry of selected) {
                     const source = rows.find(row =>
                         row.original_entry === entry.original_entry &&
-                        row.source_detail === entry.source_detail
+                        row.source_detail === entry.source_detail &&
+                        (row.batch_no || null) === entry.batch_no
                     );
                     if (!source || entry.qty > flt(source.maximum_qty)) {
                         frappe.msgprint(__("A return quantity exceeds the allowable balance."));
