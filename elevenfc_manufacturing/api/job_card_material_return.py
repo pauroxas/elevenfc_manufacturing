@@ -9,6 +9,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, flt
 
+from erpnext.stock.doctype.batch.batch import get_batch_qty
 from erpnext.stock.doctype.stock_entry.stock_entry import get_available_materials
 
 
@@ -64,6 +65,68 @@ def _already_returned(source_name, exclude_stock_entry=None):
     return {d.ste_detail: flt(d.qty) for d in rows}
 
 
+
+def _row_batch_quantities(row):
+    """Read actual batch identities on a source/return row.
+
+    An original material transfer usually has an outward Serial and Batch
+    Bundle. Older transfers can have only batch_no. Never silently invent a
+    batch if the associated bundle has no valid batch entries.
+    """
+    if row.get("serial_and_batch_bundle"):
+        entries = frappe.get_all(
+            "Serial and Batch Entry",
+            filters={"parent": row.serial_and_batch_bundle},
+            fields=["batch_no", "qty"],
+        )
+        if not entries or any(not entry.batch_no for entry in entries):
+            frappe.throw(_("Batch details are missing or invalid in bundle {0}.").format(
+                row.serial_and_batch_bundle
+            ))
+        result = defaultdict(float)
+        for entry in entries:
+            result[entry.batch_no] += abs(flt(entry.qty))
+        if row.get("batch_no") and set(result) != {row.batch_no}:
+            frappe.throw(_("Batch field and Serial and Batch Bundle disagree for item {0}.").format(
+                row.item_code
+            ))
+        return dict(result)
+    if row.get("batch_no"):
+        return {row.batch_no: flt(row.transfer_qty)}
+    return {}
+
+
+def _already_returned_by_batch(source_name, exclude_stock_entry=None):
+    """Track submitted returns by ORIGINAL transfer row AND physical batch."""
+    rows = frappe.db.sql(
+        """
+        SELECT sed.ste_detail, sed.batch_no, sed.serial_and_batch_bundle,
+               sed.transfer_qty, sed.item_code
+        FROM `tabStock Entry Detail` sed
+        INNER JOIN `tabStock Entry` se ON se.name = sed.parent
+        WHERE sed.against_stock_entry = %s
+          AND se.docstatus = 1
+          AND se.purpose = %s
+          AND se.is_return = 1
+          AND (%s IS NULL OR se.name != %s)
+        """,
+        (source_name, PURPOSE, exclude_stock_entry, exclude_stock_entry),
+        as_dict=True,
+    )
+    returned = defaultdict(float)
+    for row in rows:
+        for batch_no, qty in _row_batch_quantities(row).items():
+            returned[(row.ste_detail, batch_no)] += qty
+    return returned
+
+
+def _batch_qty_available(item_code, warehouse, batch_no):
+    """Current available physical WIP stock for this specific batch."""
+    return max(0, flt(get_batch_qty(
+        batch_no=batch_no, item_code=item_code, warehouse=warehouse
+    )))
+
+
 def _job_card_available(job_card):
     """Net transferred minus material consumed per Job Card Item."""
     rows = frappe.db.sql(
@@ -106,6 +169,8 @@ def _returnable_rows(source):
     returned = _already_returned(source.name)
     wip = _wip_available(source.work_order)
     jc_available = _job_card_available(source.job_card)
+    returned_batches = None
+    batch_in_wip = {}
     result = []
 
     for row in source.items:
@@ -123,35 +188,60 @@ def _returnable_rows(source):
         ):
             continue
 
-        # Serial and batch-tracked returns require identity-level matching.
-        if frappe.get_cached_value("Item", row.item_code, "has_serial_no") or frappe.get_cached_value("Item", row.item_code, "has_batch_no"):
+        # Serial-only and serial+batch items require serial identity handling;
+        # this enhancement deliberately supports BATCH ONLY (e.g. 11FC inks).
+        if frappe.get_cached_value("Item", row.item_code, "has_serial_no"):
             continue
+        has_batch = bool(frappe.get_cached_value("Item", row.item_code, "has_batch_no"))
 
         original_left = max(0, flt(row.transfer_qty) - returned.get(row.name, 0))
         wip_key = (row.item_code, row.t_warehouse, row.original_item or None)
         wip_left = wip.get(wip_key, 0)
         jc_left = jc_available.get(row.job_card_item, 0)
-        maximum = min(original_left, wip_left, jc_left)
-        if flt(maximum, 6) <= 0:
-            continue
 
-        result.append({
-            "source_detail": row.name,
-            "item_code": row.item_code,
-            "item_name": row.item_name,
-            "stock_uom": row.stock_uom,
-            "from_warehouse": row.t_warehouse,
-            "to_warehouse": row.s_warehouse,
-            "original_qty": flt(row.transfer_qty),
-            "already_returned": returned.get(row.name, 0),
-            "maximum_qty": flt(maximum, 6),
-            "original_item": row.original_item,
-            "job_card_item": row.job_card_item,
-            "wip_key": wip_key,
-        })
+        batch_quantities = {None: flt(row.transfer_qty)}
+        if has_batch:
+            batch_quantities = _row_batch_quantities(row)
+            if not batch_quantities:
+                continue
+            if returned_batches is None:
+                returned_batches = _already_returned_by_batch(source.name)
+
+        for batch_no, batch_original_qty in batch_quantities.items():
+            remaining = original_left
+            if batch_no:
+                remaining = min(
+                    remaining,
+                    max(0, batch_original_qty - returned_batches.get((row.name, batch_no), 0)),
+                )
+                key = (row.item_code, row.t_warehouse, batch_no)
+                if key not in batch_in_wip:
+                    batch_in_wip[key] = _batch_qty_available(*key)
+                remaining = min(remaining, batch_in_wip[key])
+
+            maximum = min(remaining, wip_left, jc_left)
+            if flt(maximum, 6) <= 0:
+                continue
+
+            result.append({
+                "source_detail": row.name,
+                "item_code": row.item_code,
+                "item_name": row.item_name,
+                "stock_uom": row.stock_uom,
+                "batch_no": batch_no,
+                "from_warehouse": row.t_warehouse,
+                "to_warehouse": row.s_warehouse,
+                "original_qty": flt(batch_original_qty),
+                "already_returned": (
+                    returned_batches.get((row.name, batch_no), 0) if batch_no else returned.get(row.name, 0)
+                ),
+                "maximum_qty": flt(maximum, 6),
+                "original_item": row.original_item,
+                "job_card_item": row.job_card_item,
+                "wip_key": wip_key,
+            })
 
     return result
-
 
 @frappe.whitelist()
 def list_original_transfers(job_card):
@@ -210,6 +300,10 @@ def validate_return_doc(doc, lock_source=False):
     requested_by_wip = defaultdict(float)
     requested_by_jc = defaultdict(float)
     requested_by_detail = defaultdict(float)
+    requested_by_detail_batch = defaultdict(float)
+    requested_by_batch_wip = defaultdict(float)
+    original_batch_quantities = {}
+    returned_batches = None
 
     if not doc.items:
         frappe.throw(_("Select at least one raw material to return."))
@@ -235,8 +329,28 @@ def validate_return_doc(doc, lock_source=False):
         if row.stock_uom != original_row.stock_uom:
             frappe.throw(_("Return row {0}: Stock UOM must match original.").format(row.idx))
 
-        if frappe.get_cached_value("Item", row.item_code, "has_serial_no") or frappe.get_cached_value("Item", row.item_code, "has_batch_no"):
-            frappe.throw(_("Serial/batch tracked items are not yet supported by the 11FC Job Card return workflow."))
+        if frappe.get_cached_value("Item", row.item_code, "has_serial_no"):
+            frappe.throw(_("Serial-numbered items are not supported by this Job Card return workflow."))
+
+        if frappe.get_cached_value("Item", row.item_code, "has_batch_no"):
+            if row.ste_detail not in original_batch_quantities:
+                original_batch_quantities[row.ste_detail] = _row_batch_quantities(original_row)
+            source_batches = original_batch_quantities[row.ste_detail]
+            returned_row_batches = _row_batch_quantities(row)
+            if len(returned_row_batches) != 1:
+                frappe.throw(_("Return row {0} must specify exactly one original batch.").format(row.idx))
+            batch_no, batch_qty = next(iter(returned_row_batches.items()))
+            if (
+                batch_no not in source_batches
+                or flt(batch_qty - row.transfer_qty, 6) != 0
+            ):
+                frappe.throw(_("Return row {0} has a batch or quantity not present in its original transfer.").format(row.idx))
+            if returned_batches is None:
+                returned_batches = _already_returned_by_batch(original_name, exclude_stock_entry=doc.name)
+            requested_by_detail_batch[(row.ste_detail, batch_no)] += flt(row.transfer_qty)
+            requested_by_batch_wip[(row.item_code, row.s_warehouse, batch_no)] += flt(row.transfer_qty)
+        elif row.get("serial_and_batch_bundle") or row.get("batch_no"):
+            frappe.throw(_("Return row {0} uses an unexpected batch reference.").format(row.idx))
 
         requested_by_detail[row.ste_detail] += flt(row.transfer_qty)
         key = (row.item_code, row.s_warehouse, row.original_item or None)
@@ -252,6 +366,22 @@ def validate_return_doc(doc, lock_source=False):
                     detail_name, max(0, available)
                 )
             )
+
+    for (detail_name, batch_no), qty in requested_by_detail_batch.items():
+        available = (
+            original_batch_quantities[detail_name][batch_no]
+            - returned_batches.get((detail_name, batch_no), 0)
+        )
+        if flt(qty - available, 6) > 0:
+            frappe.throw(_("Original transfer line {0}, Batch {1}, has only {2} remaining to return.").format(
+                detail_name, batch_no, max(0, available)
+            ))
+
+    for (item_code, warehouse, batch_no), qty in requested_by_batch_wip.items():
+        if flt(qty - _batch_qty_available(item_code, warehouse, batch_no), 6) > 0:
+            frappe.throw(_("Insufficient available stock of Batch {0} for {1} in {2}.").format(
+                batch_no, item_code, warehouse
+            ))
 
     for key, qty in requested_by_wip.items():
         if flt(qty - wip.get(key, 0), 6) > 0:
@@ -277,16 +407,20 @@ def create_draft_return(job_card, original_entry, quantities):
     if not isinstance(quantities, list) or len(quantities) > 100:
         frappe.throw(_("Submit return quantities as a list of source rows."))
 
-    permitted = {d["source_detail"]: d for d in _returnable_rows(source)}
+    permitted = {
+        (d["source_detail"], d.get("batch_no") or None): d
+        for d in _returnable_rows(source)
+    }
     requested = defaultdict(float)
     for entry in quantities:
         if not isinstance(entry, dict):
             frappe.throw(_("Invalid return quantity row."))
         detail_name = entry.get("source_detail")
+        batch_no = entry.get("batch_no") or None
         qty = flt(entry.get("qty"))
-        if detail_name not in permitted or qty <= 0:
-            frappe.throw(_("Invalid return quantity for original row {0}.").format(detail_name))
-        requested[detail_name] += qty
+        if (detail_name, batch_no) not in permitted or qty <= 0:
+            frappe.throw(_("Invalid return quantity or batch for original row {0}.").format(detail_name))
+        requested[(detail_name, batch_no)] += qty
 
     if not requested:
         frappe.throw(_("Enter at least one return quantity."))
@@ -305,10 +439,12 @@ def create_draft_return(job_card, original_entry, quantities):
     doc.set_stock_entry_type()
 
     source_rows = {row.name: row for row in source.items}
-    for detail_name, qty in requested.items():
+    for (detail_name, batch_no), qty in requested.items():
         row = source_rows[detail_name]
-        if flt(qty - permitted[detail_name]["maximum_qty"], 6) > 0:
-            frappe.throw(_("Return exceeds the available quantity for {0}.").format(row.item_code))
+        if flt(qty - permitted[(detail_name, batch_no)]["maximum_qty"], 6) > 0:
+            frappe.throw(_("Return exceeds the available quantity for {0}, Batch {1}.").format(
+                row.item_code, batch_no or "N/A"
+            ))
 
         doc.append("items", {
             "item_code": row.item_code,
@@ -318,6 +454,8 @@ def create_draft_return(job_card, original_entry, quantities):
             "uom": row.stock_uom,
             "stock_uom": row.stock_uom,
             "conversion_factor": 1,
+            "batch_no": batch_no,
+            "use_serial_batch_fields": 1 if batch_no else 0,
             "s_warehouse": row.t_warehouse,
             "t_warehouse": row.s_warehouse,
             "original_item": row.original_item,
@@ -367,11 +505,15 @@ def create_draft_returns(job_card, quantities):
         frappe.throw(_("Enter return quantities for at least one eligible material row."))
 
     available_rows = get_job_card_returnable_rows(job_card)
-    indexed = {(d["original_entry"], d["source_detail"]): d for d in available_rows}
+    indexed = {
+        (d["original_entry"], d["source_detail"], d.get("batch_no") or None): d
+        for d in available_rows
+    }
     grouped = defaultdict(lambda: defaultdict(float))
     totals_wip = defaultdict(float)
     totals_job_item = defaultdict(float)
     original_rows = defaultdict(float)
+    totals_by_batch = defaultdict(float)
 
     for entry in quantities:
         if not isinstance(entry, dict):
@@ -379,17 +521,20 @@ def create_draft_returns(job_card, quantities):
 
         source = entry.get("original_entry")
         detail = entry.get("source_detail")
+        batch_no = entry.get("batch_no") or None
         qty = flt(entry.get("qty"))
-        key = (source, detail)
+        key = (source, detail, batch_no)
         if key not in indexed or qty <= 0:
             frappe.throw(_("An invalid or unavailable material row was selected."))
 
         info = indexed[key]
         original_rows[key] += qty
-        grouped[source][detail] += qty
+        grouped[source][(detail, batch_no)] += qty
         wip_key = (info["item_code"], info["from_warehouse"], info["original_item"] or None)
         totals_wip[wip_key] += qty
         totals_job_item[info["job_card_item"]] += qty
+        if batch_no:
+            totals_by_batch[(info["item_code"], info["from_warehouse"], batch_no)] += qty
 
     # Each original line, WIP material and Job Card Item must be checked
     # cumulatively across ALL selected rows/sources.
@@ -399,6 +544,11 @@ def create_draft_returns(job_card, quantities):
 
     wip = _wip_available(_wo.name)
     by_jc = _job_card_available(job_card)
+    for (item_code, warehouse, batch_no), qty in totals_by_batch.items():
+        if flt(qty - _batch_qty_available(item_code, warehouse, batch_no), 6) > 0:
+            frappe.throw(_("Total selected return quantity exceeds available WIP stock for Batch {0}.").format(
+                batch_no
+            ))
     for key, qty in totals_wip.items():
         if flt(qty - wip.get(key, 0), 6) > 0:
             frappe.throw(_("Total selected return quantity exceeds unconsumed WIP material."))
@@ -410,7 +560,10 @@ def create_draft_returns(job_card, quantities):
     for source_name, detail_quantities in grouped.items():
         response = create_draft_return(
             job_card, source_name,
-            [{"source_detail": detail, "qty": qty} for detail, qty in detail_quantities.items()],
+            [
+                {"source_detail": detail, "batch_no": batch_no, "qty": qty}
+                for (detail, batch_no), qty in detail_quantities.items()
+            ],
         )
         created.append(response["name"])
     return {"names": created}
